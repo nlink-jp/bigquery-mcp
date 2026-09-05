@@ -3,10 +3,8 @@ package cmd
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 
 	"github.com/nlink-jp/bigquery-mcp/internal/bq"
@@ -50,7 +48,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	client, err := bq.New(ctx, cfg, logger)
+	client, err := bq.New(ctx, cfg, logger, Version)
 	if err != nil {
 		return err
 	}
@@ -80,11 +78,7 @@ func resolveConfig(explicit string) (*config.Config, error) {
 	if env := os.Getenv("BIGQUERY_MCP_CONFIG"); env != "" {
 		return config.Load(env)
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("resolve home directory: %w", err)
-	}
-	return config.Load(filepath.Join(home, ".config", "bigquery-mcp", "config.toml"))
+	return config.LoadDefault()
 }
 
 func init() {

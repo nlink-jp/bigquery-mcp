@@ -7,12 +7,17 @@ package transport
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"sync"
 )
 
-// MaxLineSize is the maximum size of a single JSON-RPC message line.
-const MaxLineSize = 1024 * 1024 // 1MB
+// MaxLineSize is the maximum size of a single JSON-RPC message line. It
+// is above BigQuery's 1 MB SQL limit with room for JSON escaping, so an
+// over-long query is refused by BigQuery with invalid_query rather than
+// by the scanner (review finding 12).
+const MaxLineSize = 8 * 1024 * 1024 // 8 MiB
 
 // StdioTransport reads newline-delimited JSON messages from an io.Reader
 // and writes them to an io.Writer.
@@ -39,6 +44,9 @@ func (t *StdioTransport) ReadMessage() ([]byte, error) {
 		return line, nil
 	}
 	if err := t.scanner.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return nil, fmt.Errorf("a JSON-RPC line exceeded %d bytes; the server cannot resync and stops: %w", MaxLineSize, err)
+		}
 		return nil, err
 	}
 	return nil, io.EOF

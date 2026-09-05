@@ -30,6 +30,9 @@ func TestMapHTTPErrorTable(t *testing.T) {
 		{"billing not enabled", 403, `{"error":{"code":403,"message":"Billing has not been enabled","errors":[{"reason":"billingNotEnabled"}]}}`, toolerr.CodeAccessDenied, false},
 		{"plain 400", 400, `{"error":{"code":400,"message":"Syntax error"}}`, toolerr.CodeInvalidQuery, false},
 		{"unknown 418", 418, `teapot`, toolerr.CodeUpstreamError, false},
+		{"501 not retryable", 501, `{"error":{"code":501,"message":"not implemented","errors":[{"reason":"notImplemented"}]}}`, toolerr.CodeUpstreamError, false},
+		{"api not enabled", 403, `{"error":{"code":403,"message":"BigQuery API has not been used in project 1 before","errors":[{"reason":"accessNotConfigured"}]}}`, toolerr.CodeAccessDenied, false},
+		{"duplicate job", 409, `{"error":{"code":409,"message":"Already Exists: Job p:US.bqmcp-1","errors":[{"reason":"duplicate"}]}}`, toolerr.CodeDuplicate, false},
 		{"html body", 502, `<html>bad gateway</html>`, toolerr.CodeBackendError, true},
 	}
 	for _, tc := range cases {
@@ -60,12 +63,25 @@ func TestMapJobError(t *testing.T) {
 	if e.Code != toolerr.CodeInvalidQuery || e.Details["job_id"] != "job-1" || e.Details["job_location"] != "US" || e.Details["location"] != "q" {
 		t.Errorf("%+v", e)
 	}
-	e = mapJobError(&ErrorProto{Reason: "stopped", Message: "cancelled"}, "", "")
+	e = mapJobError(&ErrorProto{Reason: "stopped", Message: "Job execution was cancelled: User requested cancellation"}, "", "")
+	if e.Code != toolerr.CodeCancelled {
+		t.Errorf("an outside cancel maps to cancelled, got %s", e.Code)
+	}
+	e = mapJobError(&ErrorProto{Reason: "stopped", Message: "Job execution was cancelled: Job timed out after 180.0 sec"}, "", "")
 	if e.Code != toolerr.CodeTimeout {
-		t.Errorf("stopped should map to timeout, got %s", e.Code)
+		t.Errorf("a stop for timeout maps to timeout, got %s", e.Code)
 	}
 	if _, ok := e.Details["job_id"]; ok {
 		t.Errorf("empty job id must not appear in details")
+	}
+}
+
+func TestHintsMatchTheReason(t *testing.T) {
+	if e := mapHTTPError(403, []byte(`{"error":{"message":"x","errors":[{"reason":"accessNotConfigured"}]}}`)); !contains(e.Message, "API is not enabled") || contains(e.Message, "jobUser") {
+		t.Errorf("accessNotConfigured must not get the IAM hint: %q", e.Message)
+	}
+	if e := mapHTTPError(403, []byte(`{"error":{"message":"x","errors":[{"reason":"billingNotEnabled"}]}}`)); !contains(e.Message, "billing") || contains(e.Message, "jobUser") {
+		t.Errorf("billingNotEnabled must get the billing hint: %q", e.Message)
 	}
 }
 

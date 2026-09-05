@@ -19,6 +19,19 @@ func (r TableRef) String() string { return r.ProjectID + "." + r.DatasetID + "."
 // DatasetKey renders project.dataset.
 func (r TableRef) DatasetKey() string { return r.ProjectID + "." + r.DatasetID }
 
+// RoutineRef identifies a routine (UDF, procedure, table function).
+type RoutineRef struct {
+	ProjectID string `json:"projectId"`
+	DatasetID string `json:"datasetId"`
+	RoutineID string `json:"routineId"`
+}
+
+// String renders project.dataset.routine.
+func (r RoutineRef) String() string { return r.ProjectID + "." + r.DatasetID + "." + r.RoutineID }
+
+// DatasetKey renders project.dataset.
+func (r RoutineRef) DatasetKey() string { return r.ProjectID + "." + r.DatasetID }
+
 // FieldSchema is one column (TableFieldSchema), nested for RECORD.
 type FieldSchema struct {
 	Name        string         `json:"name"`
@@ -57,7 +70,8 @@ type QueryParameter struct {
 	ParameterValue QueryParameterValue `json:"parameterValue"`
 }
 
-// QueryParameterType names a scalar type (STRING, INT64, FLOAT64, BOOL, DATE, TIMESTAMP...).
+// QueryParameterType names a scalar type (STRING, INT64, FLOAT64, BOOL,
+// NUMERIC, BIGNUMERIC, DATE, TIME, DATETIME, TIMESTAMP, BYTES, GEOGRAPHY, JSON).
 type QueryParameterType struct {
 	Type string `json:"type"`
 }
@@ -131,16 +145,20 @@ type insertJobRequest struct {
 }
 
 type jobConfiguration struct {
-	DryRun bool                  `json:"dryRun"`
-	Labels map[string]string     `json:"labels,omitempty"`
-	Query  jobConfigurationQuery `json:"query"`
+	DryRun       bool                  `json:"dryRun"`
+	JobTimeoutMs string                `json:"jobTimeoutMs,omitempty"`
+	Labels       map[string]string     `json:"labels,omitempty"`
+	Query        jobConfigurationQuery `json:"query"`
 }
 
 type jobConfigurationQuery struct {
-	Query           string           `json:"query"`
-	UseLegacySQL    bool             `json:"useLegacySql"`
-	ParameterMode   string           `json:"parameterMode,omitempty"`
-	QueryParameters []QueryParameter `json:"queryParameters,omitempty"`
+	Query              string           `json:"query"`
+	UseLegacySQL       bool             `json:"useLegacySql"`
+	ParameterMode      string           `json:"parameterMode,omitempty"`
+	QueryParameters    []QueryParameter `json:"queryParameters,omitempty"`
+	MaximumBytesBilled string           `json:"maximumBytesBilled,omitempty"`
+	UseQueryCache      *bool            `json:"useQueryCache,omitempty"`
+	Priority           string           `json:"priority,omitempty"`
 }
 
 // jobResource is the subset of the Job resource read after jobs.insert.
@@ -152,11 +170,21 @@ type jobResource struct {
 		Errors      []ErrorProto `json:"errors"`
 	} `json:"status"`
 	Statistics struct {
-		Query struct {
-			StatementType       string       `json:"statementType"`
-			TotalBytesProcessed string       `json:"totalBytesProcessed"`
-			ReferencedTables    []TableRef   `json:"referencedTables"`
-			Schema              *TableSchema `json:"schema"`
+		CreationTime string `json:"creationTime"`
+		StartTime    string `json:"startTime"`
+		EndTime      string `json:"endTime"`
+		TotalSlotMs  string `json:"totalSlotMs"`
+		Query        struct {
+			StatementType               string           `json:"statementType"`
+			TotalBytesProcessed         string           `json:"totalBytesProcessed"`
+			TotalBytesProcessedAccuracy string           `json:"totalBytesProcessedAccuracy"`
+			TotalBytesBilled            string           `json:"totalBytesBilled"`
+			TotalSlotMs                 string           `json:"totalSlotMs"`
+			CacheHit                    *bool            `json:"cacheHit"`
+			ReferencedTables            []TableRef       `json:"referencedTables"`
+			ReferencedRoutines          []RoutineRef     `json:"referencedRoutines"`
+			UndeclaredQueryParameters   []QueryParameter `json:"undeclaredQueryParameters"`
+			Schema                      *TableSchema     `json:"schema"`
 		} `json:"query"`
 	} `json:"statistics"`
 }
@@ -238,6 +266,9 @@ type TableInfo struct {
 	Clustering             *Clustering        `json:"clustering,omitempty"`
 	RequirePartitionFilter bool               `json:"requirePartitionFilter,omitempty"`
 	Location               string             `json:"location,omitempty"`
+	View                   *struct {
+		Query string `json:"query"`
+	} `json:"view,omitempty"`
 }
 
 // PartitionColumn returns the partition column and kind ("time" or

@@ -18,7 +18,7 @@ func write(t *testing.T, body string) string {
 }
 
 func TestLoadMissingFileGivesDefaults(t *testing.T) {
-	cfg, err := Load(filepath.Join(t.TempDir(), "nope.toml"))
+	cfg, err := load(filepath.Join(t.TempDir(), "nope.toml"), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,6 @@ func TestLoadRejects(t *testing.T) {
 		"default above hard": "[results]\ndefault_max_rows = 10\nhard_max_rows = 5\n",
 		"negative rows":      "[results]\ndefault_max_rows = -1\n",
 		"wildcard project":   "[access]\ndatasets = [\"*.ds\"]\n",
-		"three-part dataset": "[access]\ndatasets = [\"a.b.c\"]\n",
 		"not toml":           "this is not toml = = =\n",
 	}
 	for name, body := range cases {
@@ -94,6 +93,25 @@ func TestLoadRejects(t *testing.T) {
 				t.Errorf("expected an error")
 			}
 		})
+	}
+}
+
+func TestExplicitPathMustExist(t *testing.T) {
+	if _, err := Load(filepath.Join(t.TempDir(), "named.toml")); err == nil {
+		t.Errorf("a named config path that does not exist must be an error")
+	}
+}
+
+func TestDomainScopedProjectInAllowlist(t *testing.T) {
+	cfg, err := Load(write(t, "[access]\ndatasets = [\"example.com:proj.ds\", \"example.com:proj.*\"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Datasets) != 2 {
+		t.Fatalf("%v", cfg.Datasets)
+	}
+	if p, d, ok := SplitDataset("example.com:proj.ds"); !ok || p != "example.com:proj" || d != "ds" {
+		t.Errorf("SplitDataset = %q %q %v", p, d, ok)
 	}
 }
 

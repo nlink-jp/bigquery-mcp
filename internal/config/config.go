@@ -30,6 +30,9 @@ const (
 	DefaultHardMaxRows          = 50000
 	DefaultMaxBytes       int64 = 1 << 20 // 1 MiB response budget
 	DefaultLogLevel             = "info"
+	// MinBytesBilled is BigQuery's per-table billing minimum; a budget
+	// below it fails every real query (review finding 8).
+	MinBytesBilled int64 = 10 << 20
 )
 
 // Config is the resolved configuration.
@@ -114,17 +117,28 @@ func Default() *Config {
 	}
 }
 
-// Load reads the TOML file at path. A missing file is not an error — the
-// returned Config holds the defaults (and serve refuses to start without a
-// project id). Unknown keys are an error: a misspelled budget key must not
+// Load reads the TOML file at path. A missing file at the default path is
+// not an error — the returned Config holds the defaults (and serve refuses
+// to start without a project id) — but a path the operator named must
+// exist. Unknown keys are an error: a misspelled budget key must not
 // silently leave the default in place.
 func Load(path string) (*Config, error) {
+	return load(path, path != "")
+}
+
+// LoadDefault reads the default path, tolerating its absence.
+func LoadDefault() (*Config, error) { return load(DefaultPath(), false) }
+
+func load(path string, mustExist bool) (*Config, error) {
 	cfg := Default()
 	if path == "" {
 		path = DefaultPath()
 	}
 	if _, err := os.Stat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			if mustExist {
+				return nil, fmt.Errorf("config: %s does not exist", path)
+			}
 			return cfg, nil
 		}
 		return nil, fmt.Errorf("config: stat %s: %w", path, err)
@@ -157,8 +171,8 @@ func apply(cfg *Config, raw *tomlConfig) error {
 		if err != nil {
 			return fmt.Errorf("[budget] max_bytes_billed: %w", err)
 		}
-		if n <= 0 {
-			return errors.New("[budget] max_bytes_billed must be positive")
+		if n < MinBytesBilled {
+			return fmt.Errorf("[budget] max_bytes_billed must be at least 10MiB (BigQuery bills 10 MB per table at minimum), got %s", s)
 		}
 		cfg.MaxBytesBilled = n
 	}
@@ -211,23 +225,42 @@ func apply(cfg *Config, raw *tomlConfig) error {
 	}
 
 	cfg.LogFile = strings.TrimSpace(raw.Logging.LogFile)
-	if s := strings.TrimSpace(raw.Logging.LogLevel); s != "" {
-		cfg.LogLevel = s
+	if s := strings.ToLower(strings.TrimSpace(raw.Logging.LogLevel)); s != "" {
+		switch s {
+		case "debug", "info", "warn", "error":
+			cfg.LogLevel = s
+		default:
+			return fmt.Errorf("[logging] log_level must be debug, info, warn or error, got %q", s)
+		}
 	}
 	cfg.LogQueries = raw.Logging.LogQueries
 	return nil
 }
 
-// validateDatasetPattern accepts "project.dataset" or "project.*".
+// validateDatasetPattern accepts "project.dataset" or "project.*". The
+// dataset is what follows the last dot, so a domain-scoped project id
+// ("example.com:proj") keeps its own dot.
 func validateDatasetPattern(p string) error {
-	parts := strings.Split(p, ".")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	project, dataset, ok := SplitDataset(p)
+	if !ok {
 		return fmt.Errorf("%q is not project.dataset or project.*", p)
 	}
-	if strings.Contains(parts[0], "*") {
+	if strings.Contains(project, "*") {
 		return fmt.Errorf("%q: the project part may not be a wildcard", p)
 	}
+	if strings.Contains(dataset, "*") && dataset != "*" {
+		return fmt.Errorf("%q: the dataset part is either a name or exactly *", p)
+	}
 	return nil
+}
+
+// SplitDataset splits "project.dataset" at the last dot.
+func SplitDataset(p string) (project, dataset string, ok bool) {
+	i := strings.LastIndex(p, ".")
+	if i <= 0 || i == len(p)-1 {
+		return "", "", false
+	}
+	return p[:i], p[i+1:], true
 }
 
 // ParseSize parses a byte size such as "10GiB", "512MiB", "1.5GB", "1048576".

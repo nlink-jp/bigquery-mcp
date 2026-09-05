@@ -70,30 +70,48 @@ func Newf(code, format string, args ...any) *Error {
 }
 
 // Stable error codes. Adding a code is a no-op for older clients (they fall
-// back to Message); renaming one is a breaking change.
+// back to Message); renaming one is a breaking change. Codes is the single
+// documented list: get_usage renders it and the tests check that every code
+// the server can produce appears in it (ADR-0004).
 const (
-	// CodeInvalidArguments: argument type, missing argument, max_rows above the ceiling.
-	CodeInvalidArguments = "invalid_arguments"
-	// CodeInvalidQuery: BigQuery rejected the SQL (syntax, unknown column, too long).
-	CodeInvalidQuery = "invalid_query"
-	// CodeStatementNotAllowed: the dry run classified the statement as something other than SELECT.
+	CodeInvalidArguments    = "invalid_arguments"
+	CodeInvalidQuery        = "invalid_query"
 	CodeStatementNotAllowed = "statement_not_allowed"
-	// CodeDatasetNotAllowed: a referenced table lies outside [access] datasets.
-	CodeDatasetNotAllowed = "dataset_not_allowed"
-	// CodeBudgetExceeded: the dry run estimate is above [budget] max_bytes_billed; nothing ran.
-	CodeBudgetExceeded = "budget_exceeded"
-	// CodeAccessDenied: BigQuery accessDenied (a missing IAM role).
-	CodeAccessDenied = "access_denied"
-	// CodeNotFound: project, dataset, table or job not found.
-	CodeNotFound = "not_found"
-	// CodeRateLimited: a transient quota or rate limit; retryable.
-	CodeRateLimited = "rate_limited"
-	// CodeBackendError: BigQuery backendError / internalError; retryable.
-	CodeBackendError = "backend_error"
-	// CodeTimeout: the job exceeded job_timeout, or the results wait ran out.
-	CodeTimeout = "timeout"
-	// CodeAuthError: ADC missing, expired or not renewable.
-	CodeAuthError = "auth_error"
-	// CodeUpstreamError: an HTTP or transport failure that maps to nothing above.
-	CodeUpstreamError = "upstream_error"
+	CodeDatasetNotAllowed   = "dataset_not_allowed"
+	CodeBudgetExceeded      = "budget_exceeded"
+	CodeAccessDenied        = "access_denied"
+	CodeNotFound            = "not_found"
+	CodeRateLimited         = "rate_limited"
+	CodeBackendError        = "backend_error"
+	CodeTimeout             = "timeout"
+	CodeCancelled           = "cancelled"
+	CodeAuthError           = "auth_error"
+	CodeDuplicate           = "duplicate"
+	CodeUpstreamError       = "upstream_error"
 )
+
+// CodeDoc documents one code for operators and agents.
+type CodeDoc struct {
+	Code      string
+	Cause     string
+	Recovery  string
+	Retryable string // "yes", "no", or a qualified answer
+}
+
+// Codes is the documented list, in the order get_usage prints it.
+var Codes = []CodeDoc{
+	{CodeInvalidQuery, "BigQuery rejected the SQL (details.location points at it), the query is too large, or it needs more resources than a single query may use", "fix the SQL", "no"},
+	{CodeStatementNotAllowed, "the dry run classified the statement as something other than SELECT (scripts, DML, DDL, EXPORT, CALL, ASSERT)", "rewrite as one SELECT", "no"},
+	{CodeDatasetNotAllowed, "a referenced table or routine is outside [access] datasets", "query the allowed datasets, or ask the operator", "no"},
+	{CodeBudgetExceeded, "the dry-run estimate is above [budget] max_bytes_billed (nothing ran), or BigQuery stopped the job at maximumBytesBilled (details.reason says which)", "filter on the partition column, select fewer columns, aggregate; LIMIT does not reduce scanned bytes", "no"},
+	{CodeAccessDenied, "missing IAM (roles/bigquery.jobUser on the billing project, roles/bigquery.dataViewer on the data), billing disabled, or the BigQuery API not enabled", "tell the operator which table and role", "no"},
+	{CodeNotFound, "project, dataset, table or job does not exist, or is not in the configured location", "check the id with list_*", "no"},
+	{CodeRateLimited, "a quota or rate limit", "wait and retry; a per-day quota resets at midnight Pacific and is reported retryable: false", "yes unless the message says per day"},
+	{CodeBackendError, "a BigQuery internal error; the server already retried once", "retry later, or report", "yes"},
+	{CodeTimeout, "the job exceeded job_timeout, or the call was cancelled by the client", "narrow the query; long jobs are a Phase 2 feature", "no"},
+	{CodeCancelled, "the job was stopped from outside (console, bq cancel)", "run it again if that was not intended", "no"},
+	{CodeAuthError, "no usable Application Default Credentials", "the operator runs gcloud auth application-default login", "no"},
+	{CodeInvalidArguments, "argument type, missing field, unknown field, max_rows above the ceiling", "fix the call", "no"},
+	{CodeDuplicate, "a job with this id already exists (the server's own retry handles this internally)", "report it if it reaches you", "no"},
+	{CodeUpstreamError, "an HTTP or transport failure that maps to nothing above", "report it", "sometimes"},
+}

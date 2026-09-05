@@ -32,18 +32,23 @@ const (
 	Scope = "https://www.googleapis.com/auth/bigquery"
 	// Label attached to every job this server runs, for billing attribution.
 	Label = "bigquery-mcp"
+	// jobIDPrefix marks jobs this server created.
+	jobIDPrefix = "bqmcp-"
 
-	// pollWait is how long one jobs.query / getQueryResults call waits
-	// server-side before answering jobComplete=false.
+	// pollWait is how long one getQueryResults call waits server-side
+	// before answering jobComplete=false.
 	pollWait = 30 * time.Second
 	// pollGrace is added to the job timeout before the client gives up
 	// waiting on a job BigQuery should already have stopped.
 	pollGrace = 30 * time.Second
-	// maxBodyBytes bounds a response read (a page is at most 20 MB).
+	// maxBodyBytes bounds a response read (a page is at most 10–20 MB).
 	maxBodyBytes = 64 << 20
 	// retryMin/retryMax bound the single jittered retry (ADR-0004).
 	retryMin = 500 * time.Millisecond
 	retryMax = 1500 * time.Millisecond
+	// timestampFormat asks for ISO 8601 strings with up to picosecond
+	// precision, which no numeric encoding carries.
+	timestampFormat = "ISO8601_STRING"
 )
 
 // Client talks to BigQuery for one billing project.
@@ -58,8 +63,8 @@ type Client struct {
 	tokenOnce sync.Once
 	tokenSrc  oauth2.TokenSource
 	tokenErr  error
-	// resolveTokens is how the token source is obtained on first use;
-	// tests replace it (nil means "no Authorization header").
+	// resolveTokens obtains the token source on first use; tests set it
+	// nil ("no Authorization header").
 	resolveTokens func(ctx context.Context) (oauth2.TokenSource, error)
 
 	sleep  func(ctx context.Context, d time.Duration) error
@@ -78,7 +83,7 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger, version s
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	c := &Client{
+	return &Client{
 		base:      DefaultBase,
 		http:      &http.Client{Timeout: pollWait + 60*time.Second},
 		project:   cfg.ProjectID,
@@ -90,13 +95,12 @@ func New(ctx context.Context, cfg *config.Config, logger *slog.Logger, version s
 		},
 		sleep:  sleepCtx,
 		jitter: jitterDuration,
-		newID:  newRequestID,
-	}
-	return c, nil
+		newID:  newID,
+	}, nil
 }
 
 // NewForTest builds a client against a fake server with no auth, no
-// sleeping and deterministic request ids.
+// sleeping and deterministic ids.
 func NewForTest(base string, hc *http.Client, project, location string) *Client {
 	if hc == nil {
 		hc = http.DefaultClient
@@ -104,13 +108,12 @@ func NewForTest(base string, hc *http.Client, project, location string) *Client 
 	n := 0
 	return &Client{
 		base: base, http: hc, project: project, location: location, userAgent: "bigquery-mcp/test",
-		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
-		resolveTokens: nil,
-		sleep:         func(context.Context, time.Duration) error { return nil },
-		jitter:        func() time.Duration { return 0 },
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		sleep:  func(context.Context, time.Duration) error { return nil },
+		jitter: func() time.Duration { return 0 },
 		newID: func() string {
 			n++
-			return fmt.Sprintf("test-request-%d", n)
+			return fmt.Sprintf("test-%d", n)
 		},
 	}
 }
@@ -118,31 +121,29 @@ func NewForTest(base string, hc *http.Client, project, location string) *Client 
 // Project returns the billing project.
 func (c *Client) Project() string { return c.project }
 
-// DryRunResult is what the gate reads.
+// DryRunResult is what the gate and dry_run read.
 type DryRunResult struct {
 	StatementType       string
 	TotalBytesProcessed int64
-	ReferencedTables    []TableRef
-	Schema              *TableSchema
+	// Accuracy is PRECISE, LOWER_BOUND, UPPER_BOUND or UNKNOWN.
+	Accuracy           string
+	ReferencedTables   []TableRef
+	ReferencedRoutines []RoutineRef
+	UndeclaredParams   []QueryParameter
+	Schema             *TableSchema
+	// Location is where BigQuery resolved the job to run.
+	Location string
 }
 
-// DryRun estimates the query through jobs.insert with dryRun, which is
-// the one path that reports referencedTables beside statementType and the
-// byte estimate (ADR-0002). A dry-run insert creates no job.
+// DryRun estimates the query through jobs.insert with dryRun — the one
+// path that reports referencedTables and referencedRoutines beside
+// statementType and the byte estimate (ADR-0002). No job is created.
 func (c *Client) DryRun(ctx context.Context, sql string, params []QueryParameter) (*DryRunResult, error) {
-	return c.dryRunInsert(ctx, sql, params)
-}
-
-func (c *Client) dryRunInsert(ctx context.Context, sql string, params []QueryParameter) (*DryRunResult, error) {
 	req := insertJobRequest{
 		Configuration: jobConfiguration{
 			DryRun: true,
 			Labels: map[string]string{Label: "true"},
-			Query: jobConfigurationQuery{
-				Query:           sql,
-				UseLegacySQL:    false,
-				QueryParameters: params,
-			},
+			Query:  jobConfigurationQuery{Query: sql, UseLegacySQL: false, QueryParameters: params},
 		},
 	}
 	if len(params) > 0 {
@@ -155,19 +156,23 @@ func (c *Client) dryRunInsert(ctx context.Context, sql string, params []QueryPar
 	if err := c.do(ctx, http.MethodPost, "projects/"+url.PathEscape(c.project)+"/jobs", nil, req, &job); err != nil {
 		return nil, err
 	}
+	loc := ""
+	if job.JobReference != nil {
+		loc = job.JobReference.Location
+	}
 	if job.Status.ErrorResult != nil {
-		loc := ""
-		if job.JobReference != nil {
-			loc = job.JobReference.Location
-		}
 		return nil, mapJobError(job.Status.ErrorResult, "", loc)
 	}
 	q := job.Statistics.Query
 	return &DryRunResult{
 		StatementType:       q.StatementType,
 		TotalBytesProcessed: parseInt64(q.TotalBytesProcessed),
+		Accuracy:            q.TotalBytesProcessedAccuracy,
 		ReferencedTables:    q.ReferencedTables,
+		ReferencedRoutines:  q.ReferencedRoutines,
+		UndeclaredParams:    q.UndeclaredQueryParameters,
 		Schema:              q.Schema,
+		Location:            loc,
 	}, nil
 }
 
@@ -177,7 +182,7 @@ type QueryOptions struct {
 	Params         []QueryParameter
 	MaxBytesBilled int64
 	JobTimeout     time.Duration
-	// PageSize bounds rows per page (BigQuery also caps a page at 20 MB).
+	// PageSize bounds rows per page (BigQuery also caps a page by bytes).
 	PageSize int
 	// Sink receives each decoded row; returning false stops fetching.
 	Sink func(Row) bool
@@ -198,10 +203,14 @@ type QueryResult struct {
 	Stopped bool
 }
 
-// Query runs SQL through jobs.query with the kernel caps set (ADR-0002),
-// waits for completion, and pages results into the sink until it says
-// stop or the pages run out (ADR-0003). The request carries a requestId so
-// the single retry after a transport failure cannot run the query twice.
+// Query runs SQL as a job this client names (jobs.insert with a
+// client-generated jobId), waits for it through getQueryResults, reads the
+// billing statistics from jobs.get once it is done, and pages rows into
+// the sink until it says stop or the pages run out (ADR-0003).
+//
+// Naming the job is what makes the single retry safe: a second insert of
+// the same jobId is answered 409 duplicate, and the client continues with
+// the job that exists — the query never runs twice (ADR-0004 §3).
 func (c *Client) Query(ctx context.Context, o QueryOptions) (*QueryResult, error) {
 	if o.Sink == nil {
 		return nil, errors.New("bq: Query needs a sink")
@@ -210,38 +219,45 @@ func (c *Client) Query(ctx context.Context, o QueryOptions) (*QueryResult, error
 	if pageSize <= 0 {
 		pageSize = 1000
 	}
-	req := queryRequest{
-		Query:           o.SQL,
-		UseLegacySQL:    false,
-		Location:        c.location,
-		TimeoutMs:       pollWait.Milliseconds(),
-		MaxResults:      int64(pageSize),
-		Labels:          map[string]string{Label: "true"},
-		UseQueryCache:   boolPtr(true),
-		RequestID:       c.newID(),
-		QueryParameters: o.Params,
-		FormatOptions:   &formatOptions{UseInt64Timestamp: true},
+	jobID := jobIDPrefix + c.newID()
+	req := insertJobRequest{
+		JobReference: &jobReference{ProjectID: c.project, JobID: jobID, Location: c.location},
+		Configuration: jobConfiguration{
+			Labels: map[string]string{Label: "true"},
+			Query: jobConfigurationQuery{
+				Query:           o.SQL,
+				UseLegacySQL:    false,
+				QueryParameters: o.Params,
+				UseQueryCache:   boolPtr(true),
+				Priority:        "INTERACTIVE",
+			},
+		},
 	}
 	if len(o.Params) > 0 {
-		req.ParameterMode = "NAMED"
+		req.Configuration.Query.ParameterMode = "NAMED"
 	}
 	if o.MaxBytesBilled > 0 {
-		req.MaximumBytesBilled = strconv.FormatInt(o.MaxBytesBilled, 10)
+		req.Configuration.Query.MaximumBytesBilled = strconv.FormatInt(o.MaxBytesBilled, 10)
 	}
 	if o.JobTimeout > 0 {
-		req.JobTimeoutMs = strconv.FormatInt(o.JobTimeout.Milliseconds(), 10)
+		req.Configuration.JobTimeoutMs = strconv.FormatInt(o.JobTimeout.Milliseconds(), 10)
 	}
-	var resp queryResponse
-	if err := c.do(ctx, http.MethodPost, "projects/"+url.PathEscape(c.project)+"/queries", nil, req, &resp); err != nil {
-		return nil, err
+	var job jobResource
+	err := c.do(ctx, http.MethodPost, "projects/"+url.PathEscape(c.project)+"/jobs", nil, req, &job)
+	if err != nil {
+		te := asToolError(err)
+		if te.Code != toolerr.CodeDuplicate {
+			return nil, te
+		}
+		// The first insert reached BigQuery after all: continue with it.
+		c.logger.Info("job already exists after retry; continuing", "job_id", jobID)
 	}
-	res := &QueryResult{}
-	if resp.JobReference != nil {
-		res.JobID = resp.JobReference.JobID
-		res.Location = resp.JobReference.Location
+	res := &QueryResult{JobID: jobID, Location: c.location}
+	if job.JobReference != nil && job.JobReference.Location != "" {
+		res.Location = job.JobReference.Location
 	}
-	if res.Location == "" {
-		res.Location = resp.Location
+	if job.Status.ErrorResult != nil {
+		return nil, mapJobError(job.Status.ErrorResult, jobID, res.Location)
 	}
 
 	// Wait for completion. BigQuery enforces jobTimeoutMs; the client
@@ -251,29 +267,46 @@ func (c *Client) Query(ctx context.Context, o QueryOptions) (*QueryResult, error
 	if o.JobTimeout > 0 {
 		deadline = deadline.Add(o.JobTimeout)
 	}
-	for !resp.JobComplete {
-		if res.JobID == "" {
-			return nil, toolerr.New(toolerr.CodeBackendError, "BigQuery answered jobComplete=false without a job reference").AsRetryable()
+	var resp queryResponse
+	for {
+		if err := c.getQueryResults(ctx, jobID, res.Location, "", pageSize, &resp); err != nil {
+			return nil, err
+		}
+		if resp.JobReference != nil && resp.JobReference.Location != "" {
+			res.Location = resp.JobReference.Location
+		}
+		if resp.JobComplete {
+			break
 		}
 		if time.Now().After(deadline) {
 			return nil, toolerr.Newf(toolerr.CodeTimeout, "the query did not complete within job_timeout (%s)", o.JobTimeout).
-				WithDetails(map[string]any{"job_id": res.JobID, "job_location": res.Location})
-		}
-		if err := c.getQueryResults(ctx, res.JobID, res.Location, "", pageSize, &resp); err != nil {
-			return nil, err
+				WithDetails(map[string]any{"job_id": jobID, "job_location": res.Location})
 		}
 	}
 	if len(resp.Errors) > 0 && resp.Schema == nil {
-		return nil, mapJobError(&resp.Errors[0], res.JobID, res.Location)
+		return nil, mapJobError(&resp.Errors[0], jobID, res.Location)
 	}
-	res.StatementType = resp.StatementType
 	res.Schema = resp.Schema
 	res.TotalRows = parseInt64(resp.TotalRows)
 	res.BytesProcessed = parseInt64(resp.TotalBytesProcessed)
-	res.BytesBilled = parseInt64(resp.TotalBytesBilled)
-	res.SlotMs = parseInt64(resp.TotalSlotMs)
-	if resp.CacheHit != nil {
-		res.CacheHit = *resp.CacheHit
+
+	// The billing statistics live on the Job resource, not on the
+	// results page (review finding 2).
+	if stats, err := c.getJob(ctx, jobID, res.Location); err == nil {
+		res.StatementType = stats.Statistics.Query.StatementType
+		res.BytesBilled = parseInt64(stats.Statistics.Query.TotalBytesBilled)
+		res.SlotMs = parseInt64(stats.Statistics.Query.TotalSlotMs)
+		if stats.Statistics.Query.CacheHit != nil {
+			res.CacheHit = *stats.Statistics.Query.CacheHit
+		}
+		if res.SlotMs == 0 {
+			res.SlotMs = parseInt64(stats.Statistics.TotalSlotMs)
+		}
+		if res.BytesProcessed == 0 {
+			res.BytesProcessed = parseInt64(stats.Statistics.Query.TotalBytesProcessed)
+		}
+	} else {
+		c.logger.Warn("jobs.get failed; billing statistics omitted", "job_id", jobID, "err", err)
 	}
 
 	// Page rows into the sink.
@@ -281,7 +314,7 @@ func (c *Client) Query(ctx context.Context, o QueryOptions) (*QueryResult, error
 		rows, err := decodeRows(resp.Schema, resp.Rows)
 		if err != nil {
 			return nil, toolerr.Newf(toolerr.CodeUpstreamError, "decode result rows: %v", err).
-				WithDetails(map[string]any{"job_id": res.JobID})
+				WithDetails(map[string]any{"job_id": jobID})
 		}
 		for _, r := range rows {
 			if !o.Sink(r) {
@@ -292,7 +325,7 @@ func (c *Client) Query(ctx context.Context, o QueryOptions) (*QueryResult, error
 		if resp.PageToken == "" {
 			return res, nil
 		}
-		if err := c.getQueryResults(ctx, res.JobID, res.Location, resp.PageToken, pageSize, &resp); err != nil {
+		if err := c.getQueryResults(ctx, jobID, res.Location, resp.PageToken, pageSize, &resp); err != nil {
 			return nil, err
 		}
 	}
@@ -308,12 +341,25 @@ func (c *Client) getQueryResults(ctx context.Context, jobID, location, pageToken
 	}
 	q.Set("maxResults", strconv.Itoa(pageSize))
 	q.Set("timeoutMs", strconv.FormatInt(pollWait.Milliseconds(), 10))
-	q.Set("formatOptions.useInt64Timestamp", "true")
+	q.Set("formatOptions.timestampOutputFormat", timestampFormat)
 	*out = queryResponse{}
 	return c.do(ctx, http.MethodGet, "projects/"+url.PathEscape(c.project)+"/queries/"+url.PathEscape(jobID), q, nil, out)
 }
 
+func (c *Client) getJob(ctx context.Context, jobID, location string) (*jobResource, error) {
+	q := url.Values{}
+	if location != "" {
+		q.Set("location", location)
+	}
+	var job jobResource
+	if err := c.do(ctx, http.MethodGet, "projects/"+url.PathEscape(c.project)+"/jobs/"+url.PathEscape(jobID), q, nil, &job); err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
 // ListDatasets lists datasets of project (the billing project when empty).
+// Hidden datasets (names starting with an underscore) are not listed.
 func (c *Client) ListDatasets(ctx context.Context, project string) ([]Dataset, error) {
 	if project == "" {
 		project = c.project
@@ -381,8 +427,8 @@ func (c *Client) GetTable(ctx context.Context, project, dataset, table string) (
 
 // do performs one request with auth, maps failures to the contract, and
 // retries exactly once on a retryable failure (ADR-0004). Every call this
-// client makes is idempotent as sent — reads, dry runs, and jobs.query
-// with a requestId — so the retry never duplicates work.
+// client makes is idempotent as sent — reads, dry runs, and a jobs.insert
+// whose jobId the client chose — so the retry never duplicates work.
 func (c *Client) do(ctx context.Context, method, path string, q url.Values, body, out any) error {
 	var payload []byte
 	if body != nil {
@@ -508,14 +554,12 @@ func jitterDuration() time.Duration {
 	return retryMin + time.Duration(n.Int64())
 }
 
-// newRequestID returns a UUID-shaped 36-character id for jobs.query idempotency.
-func newRequestID() string {
+// newID returns 32 random hex characters; with the prefix it stays well
+// inside BigQuery's job id alphabet and length.
+func newID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return strconv.FormatInt(time.Now().UnixNano(), 36)
 	}
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	h := hex.EncodeToString(b[:])
-	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+	return hex.EncodeToString(b[:])
 }
