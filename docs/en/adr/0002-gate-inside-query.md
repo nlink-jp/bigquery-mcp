@@ -49,26 +49,38 @@ asked to call first.
      `CALL` are all refused by this one comparison. No SQL text is inspected.
    - `dataset_not_allowed` when `[access] datasets` is set and a referenced
      table's `project.dataset` matches no entry (`project.dataset` exact or
-     `project.*`). This check needs `referencedTables`, so **when an
-     allowlist is configured the dry run goes through `jobs.insert`**; with
-     no allowlist it goes through `jobs.query`, which is one round trip
-     cheaper.
-   - `budget_exceeded` when `totalBytesProcessed` is above
-     `[budget] max_bytes_billed`. Nothing has run; the error carries the
-     estimate and the budget.
-3. **The run carries the kernel caps.** `maximumBytesBilled` is set to the
-   same `max_bytes_billed`, `jobTimeoutMs` to `[budget] job_timeout`, and
-   the label `bigquery-mcp: true` is attached. A query whose true bytes
-   billed exceed the estimate is stopped by BigQuery, not by this server.
+     `project.*`). This check needs `referencedTables`, which only the
+     `jobs.insert` dry run reports, so **the dry run always goes through
+     `jobs.insert`** — it is one request either way, creates no job, and
+     the referenced tables also feed the partition-filter warning (§5).
+   - `budget_exceeded` when the **billed estimate** — `totalBytesProcessed`
+     rounded up to the next MiB, with BigQuery's 10 MiB minimum per
+     referenced table — is above `[budget] max_bytes_billed`. Nothing has
+     run; the error carries the raw estimate, the billed estimate, the
+     budget and the estimate's accuracy. A budget below 10 MiB is refused
+     by the config loader, because it would fail every real query.
+3. **The run carries the kernel caps.** The query runs through
+   `jobs.insert` as a job this server names (`bqmcp-<32 hex>`), with
+   `maximumBytesBilled` set to the same `max_bytes_billed`, `jobTimeoutMs`
+   to `[budget] job_timeout`, and the label `bigquery-mcp: true`. A query
+   whose true bytes billed exceed the estimate is stopped by BigQuery, not
+   by this server, and reported as `budget_exceeded` with a hint that
+   distinguishes the kernel cap from the gate. Naming the job is also what
+   makes the single retry safe (ADR-0004 §3).
 4. **IAM is the permanent boundary.** The README's setup grants
    `roles/bigquery.jobUser` on the billing project and
    `roles/bigquery.dataViewer` on the data; nothing that can write. The
    server's statement check is the second line, never the only one, and the
    README says so.
-5. **Warnings, not refusals, for cost shape.** When `describe_table` or the
-   dry run shows a referenced table is partitioned and the SQL mentions no
-   filter on the partition column, `dry_run` and `query` add a warning
-   string. This is advice; the budget is the rule.
+5. **Warnings, not refusals, for cost shape — from numbers, never from
+   SQL text.** `dry_run` and `query` warn when a referenced table is
+   partitioned and the dry-run estimate covers its whole size (the
+   partition column pruned nothing), and when the estimate's accuracy is
+   not `PRECISE` (the kernel cap may still stop the run). The SQL is never
+   inspected, consistent with §2. This is advice; the budget is the rule.
+6. **Routines are held to the allowlist too.** A table function or UDF
+   can read tables of its own dataset; `referencedRoutines` from the dry
+   run is checked against `[access] datasets` like tables are.
 
 ## Consequences
 
@@ -79,8 +91,29 @@ asked to call first.
 - Legitimate non-SELECT reads — `ASSERT`, a `CALL` to a read-only
   procedure, scripts with `DECLARE` — are refused in v1. Phase 2's
   protected write mode is the place to widen this deliberately.
-- Two dry-run paths (`jobs.query` and `jobs.insert`) are exercised by the
-  fake server tests; the live test runs both against a real project.
+- One dry-run path (`jobs.insert`), exercised by the fake server tests
+  and by the live test against a real project.
+
+## Independent design review (2026-09-06) — what changed
+
+A fresh-context reviewer re-verified the API claims against the Discovery
+document and reported 15 findings; the ones touching this record:
+
+- **Adopted — one dry-run path.** The "cheaper" `jobs.query` dry run was a
+  false premise (one request either way) and dropped `referencedTables`;
+  the dry run always uses `jobs.insert` now (§2).
+- **Adopted — billing minimum and rounding.** The gate compares the billed
+  estimate, and a budget under 10 MiB is refused (§2).
+- **Adopted — routines.** `referencedRoutines` joins the allowlist check (§6).
+- **Adopted — text-free warnings.** The "SQL mentions the column" rule
+  contradicted §2's own principle; replaced by the byte comparison and the
+  accuracy field (§5).
+- **Adopted — kernel-cap reason.** `bytesBilledLimitExceeded` maps to
+  `budget_exceeded` with its own hint (ADR-0004 table).
+- **Recorded, not adopted — expanding TVF bodies.** Whether a table
+  function's underlying tables appear in `referencedTables` is not stated
+  by the Discovery document; the live test pins the observed behaviour
+  rather than the design assuming it.
 
 ## Alternatives considered
 
@@ -92,8 +125,10 @@ asked to call first.
 - **`dry_run` as an optional first step the prompt recommends.** Rejected:
   a capability without a trigger does not fire; the budget must not depend
   on the model remembering.
-- **Always `jobs.insert` for the dry run.** Rejected for the no-allowlist
-  case: one more request per query for a field that is not read.
+- **`jobs.query` with `dryRun` when no allowlist is configured.** Rejected
+  on second look: it is not cheaper (one request either way), and it drops
+  `referencedTables`, which the partition-filter warning needs whether or
+  not an allowlist exists. One path is simpler to test than two.
 
 ## References
 

@@ -31,7 +31,7 @@ REST 面は安定しており、Discovery ドキュメント（`https://bigquery
 
 ## 帰結
 
-- サードパーティモジュールは合計 3 つ（cobra、toml、oauth2）。フリートの他の MCP サーバー + 1。
+- 直接のサードパーティモジュールは 3 つ（cobra、toml、oauth2）、間接が 3 つ（pflag、mousetrap、compute/metadata）。フリートの他の MCP サーバー + 資格情報ライブラリ。
 - 新しい REST フィールド（新しい統計ブロック、新しいジョブオプション）は SDK の更新ではなくここの構造体編集になる。Discovery ドキュメントが参照先で、使用フィールドは `docs/ja/architecture.ja.md` に列挙する。
 - 再試行・ページング・エラー写像は本サーバー自身のコード（ADR-0004）になる。RFP がそれらを置きたい場所はまさにそこである — それが製品だから。
 - ADC の読取はプロセス内で起きる。EDR から見える足跡は SDK が行うのと同じファイル open であり、別の足跡を望む操作者には Phase 2 で `[auth] token_command` を提供する。

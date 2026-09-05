@@ -50,8 +50,9 @@ REST client ported from splunk-cli.
 
 ## Consequences
 
-- Three third-party modules in total (cobra, toml, oauth2), matching the
-  fleet's other MCP servers plus one.
+- Three direct third-party modules (cobra, toml, oauth2) and three
+  indirect ones (pflag, mousetrap, compute/metadata), matching the fleet's
+  other MCP servers plus the credential library.
 - New REST fields (a new statistics block, a new job option) require a
   struct edit here rather than an SDK bump. The Discovery document is the
   reference; `docs/en/architecture.md` lists the fields used.

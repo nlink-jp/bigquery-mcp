@@ -11,8 +11,7 @@ execution path of `query`.
 model ──tools/call query──▶ tools.query
                               │ parse + validate args (max_rows ≤ hard_max_rows)
                               ▼
-                         bq.DryRun ──▶ jobs.query{dryRun}  (no allowlist)
-                                   └─▶ jobs.insert{dryRun} (allowlist set: needs referencedTables)
+                         bq.DryRun ──▶ jobs.insert{dryRun}  (statementType, bytes, referencedTables, schema)
                               │
                               ▼  gate, in order (ADR-0002)
                          statementType == SELECT ?      ──✗ statement_not_allowed
@@ -20,7 +19,9 @@ model ──tools/call query──▶ tools.query
                          bytes ≤ max_bytes_billed ?      ──✗ budget_exceeded
                               │
                               ▼
-                         bq.Query ──▶ jobs.query{maximumBytesBilled, jobTimeoutMs, labels}
+                         bq.Query ──▶ jobs.insert{jobId=bqmcp-…, maximumBytesBilled, jobTimeoutMs, labels}
+                                   ├─▶ jobs.getQueryResults{location, timeoutMs} … until jobComplete
+                                   ├─▶ jobs.get{location}  (bytes billed, slot ms, cache hit, statement type)
                                    └─▶ jobs.getQueryResults{location, pageToken, maxResults} …
                               │
                               ▼
@@ -60,10 +61,10 @@ server and its version.
 
 | Call | Request fields used | Response fields read |
 |---|---|---|
-| `POST projects/{p}/queries` (dry run) | `query`, `useLegacySql=false`, `dryRun=true`, `location?`, `queryParameters?` | `statementType`, `totalBytesProcessed`, `schema`, `errors` |
-| `POST projects/{p}/jobs` (dry run) | `configuration.dryRun=true`, `configuration.query.{query,useLegacySql,queryParameters}`, `jobReference.location?` | `statistics.query.{statementType,totalBytesProcessed,referencedTables,schema}`, `status.errorResult` |
-| `POST projects/{p}/queries` (run) | `query`, `useLegacySql=false`, `maximumBytesBilled`, `jobTimeoutMs`, `timeoutMs`, `maxResults`, `labels`, `location?`, `queryParameters?`, `useQueryCache=true` | `jobReference.{jobId,location}`, `jobComplete`, `schema`, `rows`, `totalRows`, `pageToken`, `totalBytesProcessed`, `totalBytesBilled`, `cacheHit`, `totalSlotMs`, `errors` |
-| `GET projects/{p}/queries/{jobId}` | `location`, `pageToken`, `maxResults`, `timeoutMs` | `jobComplete`, `schema`, `rows`, `totalRows`, `pageToken`, `errors` |
+| `POST projects/{p}/jobs` (dry run) | `configuration.dryRun=true`, `configuration.query.{query,useLegacySql=false,parameterMode,queryParameters}`, `configuration.labels`, `jobReference.location?` | `jobReference.location`, `statistics.query.{statementType,totalBytesProcessed,totalBytesProcessedAccuracy,referencedTables,referencedRoutines,undeclaredQueryParameters,schema}`, `status.errorResult` |
+| `POST projects/{p}/jobs` (run) | `jobReference.{projectId,jobId=bqmcp-<32 hex>,location?}`, `configuration.{jobTimeoutMs,labels}`, `configuration.query.{query,useLegacySql=false,maximumBytesBilled,useQueryCache=true,priority=INTERACTIVE,parameterMode,queryParameters}` | `jobReference.location`, `status.errorResult`; a `409 duplicate` on the retry means the first insert landed |
+| `GET projects/{p}/queries/{jobId}` | `location`, `timeoutMs=30000`, `maxResults`, `pageToken`, `formatOptions.timestampOutputFormat=ISO8601_STRING` | `jobComplete`, `jobReference`, `schema`, `rows`, `totalRows`, `pageToken`, `totalBytesProcessed`, `errors` |
+| `GET projects/{p}/jobs/{jobId}` | `location` | `statistics.query.{statementType,totalBytesBilled,totalSlotMs,cacheHit,totalBytesProcessed}`, `statistics.totalSlotMs` |
 | `GET projects/{p}/datasets` | `pageToken`, `maxResults` | `datasets[].{datasetReference,location}`, `nextPageToken` |
 | `GET projects/{p}/datasets/{d}/tables` | `pageToken`, `maxResults` | `tables[].{tableReference,type,timePartitioning,clustering}`, `nextPageToken` |
 | `GET projects/{p}/datasets/{d}/tables/{t}` | — | `schema`, `type`, `numRows`, `numBytes`, `timePartitioning`, `rangePartitioning`, `clustering`, `creationTime`, `lastModifiedTime`, `expirationTime`, `description` |
@@ -75,15 +76,19 @@ Row decoding: BigQuery returns `rows[].f[].v` in schema order, with nested
 records as further `{f:[...]}` and repeated fields as `[{v:...}]`. The
 decoder walks the schema recursively to produce column-keyed objects:
 `RECORD` → object, `REPEATED` → array, `BYTES` stays base64, `TIMESTAMP`
-(a float of seconds) → RFC 3339 UTC, `NUMERIC`/`BIGNUMERIC` → string,
+is requested as an ISO 8601 UTC string (`ISO8601_STRING`, up to
+picosecond precision) and passed through — int64 microseconds and float
+seconds are decoded only as fallbacks — `NUMERIC`/`BIGNUMERIC` → string,
 `INTEGER` → number when it fits in 53 bits else string, `BOOLEAN` → bool,
 `JSON` → embedded JSON.
 
-Error mapping (`errors.go`): the HTTP status and `error.errors[0].reason`
-decide the code per ADR-0004's table; `message`, `location`, `reason`,
-`job_id` ride in `details`. Retry: one attempt after 500–1500 ms for
-retryable codes, only on idempotent calls (dry runs, metadata reads, a
-`jobs.query` that has not yet returned a job reference).
+Error mapping (`errors.go`): `error.errors[0].reason` decides the code
+through the one `reasonRules` table, the HTTP status only as a fallback
+(ADR-0004 §2); `message`, `location`, `reason`, `job_id` ride in
+`details`. Retry: one attempt after 500–1500 ms for retryable codes.
+Every call is idempotent as sent — dry runs create no job, reads are
+reads, and the run is a job the client named, so a retried insert is
+answered `409 duplicate` and the client continues with that job.
 
 ## `internal/tools`
 
@@ -102,9 +107,12 @@ BigQuery (`httptest`), and listed in `get_usage`.
 
 `shape.go` turns decoded rows into the response under both caps (ADR-0003)
 and produces the accounting fields. `gate.go` holds the three checks with
-their error codes. `warnings.go` produces the partition-filter advice from
-the referenced tables' partitioning (looked up through `tables.get` for
-tables the dry run named, at most a handful, cached per call).
+their error codes and the billed estimate (MiB rounding, 10 MiB per
+table). `warnings.go` produces advice from numbers only: a partitioned
+referenced table whose size the estimate covers (looked up through
+`tables.get`, at most five per call), and an estimate whose accuracy is
+not `PRECISE`. `util.go` builds query parameters from either JSON scalars
+(type inferred) or explicit `{type, value}` objects.
 
 ## `doctor`
 

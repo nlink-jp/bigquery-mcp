@@ -33,8 +33,8 @@ MCP tools (v1, six):
 |---|---|---|
 | `list_datasets` | `project?` | Dataset list; the billing project when omitted |
 | `list_tables` | `dataset`, `project?` | Tables and views, with kind |
-| `describe_table` | `dataset`, `table`, `project?` | Schema (nested), partition column and type, clustering, rows, bytes, partition expiration, created/modified |
-| `dry_run` | `query`, `params?` | Bytes, statementType, referenced tables, result schema, budget verdict (`within_budget`), a warning when a partition column has no filter |
+| `describe_table` | `dataset`, `table`, `project?` | Schema (nested), partition column, kind and granularity, `require_filter`, clustering, rows, bytes, partition expiration, created/modified/expires, location, view SQL for views |
+| `dry_run` | `query`, `params?` | Bytes (raw and billed estimate), accuracy, statementType, referenced tables and routines, undeclared parameters, result schema, location, gate verdict (`allowed`, `denied_by`), warnings from byte comparisons (a partitioned table scanned whole; an imprecise estimate) |
 | `query` | `query`, `params?`, `max_rows?` | **Always dry-runs internally** → gate (statementType is `SELECT`, within the allowlist, within budget) → `jobs.query` → paging → rows up to the caps |
 | `get_usage` | — | Reference and error-recovery table (nlink-jp MCP standard) |
 
@@ -106,7 +106,7 @@ Phase 2 tools:
 | `auth_error` | ADC missing, expired, or not renewable (points to `gcloud auth application-default login`) | no |
 | `invalid_arguments` | argument type, missing argument, `max_rows` above the ceiling | no |
 
-A `retryable: true` error is retried once inside the server, with jitter; a second failure goes to the model.
+A `retryable: true` error is retried once inside the server, with jitter; a second failure goes to the model. The table above is the RFP-time sketch; **the binding table is ADR-0004 §2**, which the code, `get_usage` and the tests share (design review 2026-09-06 added `cancelled`, `duplicate`, `upstream_error` and the kernel-cap reason).
 
 ### Configuration
 
@@ -208,7 +208,7 @@ Review unit: the fake-server suite plus the live E2E result can be judged on the
 | `jobs.insert` | `bigquery`, `cloud-platform` |
 | `jobs.cancel` | `bigquery`, `cloud-platform` |
 
-`bigquery.readonly` is listed for none of these methods, so a read-only scope cannot run queries. The default user ADC scope, `cloud-platform`, covers every path. The service-account path requests `https://www.googleapis.com/auth/bigquery`.
+`bigquery.readonly` is listed for none of these methods. `cloud-platform.read-only` can run `jobs.query` but not `jobs.insert`, which the dry run and the run both use, so a read-only-scoped credential cannot query through this server. The default user ADC scope, `cloud-platform`, covers every path. The service-account path requests `https://www.googleapis.com/auth/bigquery`.
 
 **IAM roles**:
 
@@ -229,7 +229,7 @@ Reason: the same row as splunk-mcp, data-toolbox-mcp and pcap-analyzer-mcp — a
 
 | Constraint | Value | Design response |
 |---|---|---|
-| `jobs.query` response size | 20 MB per page | Page with `maxResults`; loop `getQueryResults` until `max_rows` / `max_bytes` |
+| Results page size | 10–20 MB per page (the quotas page says 20 MB, the `maxResults` reference says 10 MB) | Page with `maxResults`; loop `getQueryResults` until `max_rows` / `max_bytes`, which is far below either |
 | Unresolved SQL length | 1 MB | Reported under `invalid_query` details |
 | On-demand daily query bytes | 200 TiB per project by default | README points to the project-level custom quota above the gate |
 | Queued interactive queries | 1,000 per project | `rate_limited` (retryable) |

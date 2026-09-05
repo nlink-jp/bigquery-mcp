@@ -33,8 +33,8 @@ MCP ツール（v1、6 本）:
 |---|---|---|
 | `list_datasets` | `project?` | データセット一覧。`project` 省略時は config の billing プロジェクト |
 | `list_tables` | `dataset`, `project?` | テーブル・ビュー一覧（種別付き） |
-| `describe_table` | `dataset`, `table`, `project?` | スキーマ（ネスト含む）、パーティション列と種別、クラスタ列、行数、サイズ、パーティション期限、作成/更新時刻 |
-| `dry_run` | `query`, `params?` | バイト数、statementType、参照テーブル、結果スキーマ、予算判定（`within_budget`）、パーティション列に対するフィルタ無しの注意 |
+| `describe_table` | `dataset`, `table`, `project?` | スキーマ（ネスト含む）、パーティション列・種別・粒度、`require_filter`、クラスタ列、行数、サイズ、パーティション期限、作成/更新/期限時刻、location、ビューなら SQL |
+| `dry_run` | `query`, `params?` | バイト数（生と課金推定）、精度、statementType、参照テーブルとルーチン、未宣言パラメータ、結果スキーマ、location、ゲート判定（`allowed`、`denied_by`）、バイト比較による警告（パーティションテーブルの全走査、不正確な推定） |
 | `query` | `query`, `params?`, `max_rows?` | **必ず内部で dry run** → ゲート（statementType が `SELECT`、許可リスト内、予算内）→ `jobs.query` 実行 → ページング → キャップまで返却 |
 | `get_usage` | なし | リファレンスとエラー回復表（nlink-jp MCP 標準） |
 
@@ -106,7 +106,7 @@ Phase 2 で追加するツール:
 | `auth_error` | ADC が無い・期限切れ・更新失敗（`gcloud auth application-default login` を案内） | no |
 | `invalid_arguments` | 引数の型・欠落・`max_rows` 上限超 | no |
 
-`retryable: true` のエラーはサーバー内でジッタ付きに 1 回だけ再試行し、それでも失敗したときにモデルへ返す。
+`retryable: true` のエラーはサーバー内でジッタ付きに 1 回だけ再試行し、それでも失敗したときにモデルへ返す。上の表は RFP 時点のスケッチであり、**拘束力を持つ表は ADR-0004 §2**。コード・`get_usage`・テストが共有する（2026-09-06 の設計レビューで `cancelled`、`duplicate`、`upstream_error`、カーネル上限の reason を追加）。
 
 ### Configuration
 
@@ -208,7 +208,7 @@ max_bytes        = "1MiB"        # レスポンス全体のバイト予算
 | `jobs.insert` | `bigquery`, `cloud-platform` |
 | `jobs.cancel` | `bigquery`, `cloud-platform` |
 
-`bigquery.readonly` はどのメソッドにも載っていないため、読取専用スコープではクエリを実行できない。利用者 ADC の既定 `cloud-platform` で全経路が通る。サービスアカウント経路では `https://www.googleapis.com/auth/bigquery` を要求する。
+`bigquery.readonly` はどのメソッドにも載っていない。`cloud-platform.read-only` は `jobs.query` は実行できるが、dry run と実行の両方が使う `jobs.insert` は実行できないため、読取専用スコープの資格情報では本サーバー経由のクエリはできない。利用者 ADC の既定 `cloud-platform` で全経路が通る。サービスアカウント経路では `https://www.googleapis.com/auth/bigquery` を要求する。
 
 **IAM ロール**:
 
@@ -229,7 +229,7 @@ Reason: splunk-mcp、data-toolbox-mcp、pcap-analyzer-mcp と同じ「解析基�
 
 | 制約 | 値 | 設計への反映 |
 |---|---|---|
-| `jobs.query` の応答サイズ | 1 ページ 20 MB | `maxResults` でページングし、`max_rows` / `max_bytes` に達するまで `getQueryResults` を回す |
+| 結果ページのサイズ | 1 ページ 10〜20 MB（quotas ページは 20 MB、`maxResults` リファレンスは 10 MB） | `maxResults` でページングし、`max_rows` / `max_bytes`（どちらより遥かに小さい）に達するまで `getQueryResults` を回す |
 | 未解決 SQL の長さ | 1 MB | 超過は `invalid_query` の details に載せる |
 | オンデマンド日次クエリ量 | 既定 200 TiB/プロジェクト | 予算ゲートの上位にあるプロジェクト側カスタム quota を README で案内 |
 | 待機中の対話クエリ | 1,000/プロジェクト | 超過は `rate_limited`（retryable） |

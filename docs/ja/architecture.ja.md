@@ -8,8 +8,7 @@
 model ──tools/call query──▶ tools.query
                               │ 引数の解析と検証（max_rows ≤ hard_max_rows）
                               ▼
-                         bq.DryRun ──▶ jobs.query{dryRun}  （許可リスト無し）
-                                   └─▶ jobs.insert{dryRun} （許可リストあり: referencedTables が要る）
+                         bq.DryRun ──▶ jobs.insert{dryRun}  （statementType・bytes・referencedTables・schema）
                               │
                               ▼  ゲート、この順で（ADR-0002）
                          statementType == SELECT ?      ──✗ statement_not_allowed
@@ -17,7 +16,9 @@ model ──tools/call query──▶ tools.query
                          bytes ≤ max_bytes_billed ?      ──✗ budget_exceeded
                               │
                               ▼
-                         bq.Query ──▶ jobs.query{maximumBytesBilled, jobTimeoutMs, labels}
+                         bq.Query ──▶ jobs.insert{jobId=bqmcp-…, maximumBytesBilled, jobTimeoutMs, labels}
+                                   ├─▶ jobs.getQueryResults{location, timeoutMs} … jobComplete まで
+                                   ├─▶ jobs.get{location}  （課金バイト・スロット ms・キャッシュ・文種別）
                                    └─▶ jobs.getQueryResults{location, pageToken, maxResults} …
                               │
                               ▼
@@ -52,19 +53,19 @@ REST ベース: `https://bigquery.googleapis.com/bigquery/v2`。全リクエス�
 
 | 呼び出し | 使うリクエストフィールド | 読むレスポンスフィールド |
 |---|---|---|
-| `POST projects/{p}/queries`（dry run） | `query`、`useLegacySql=false`、`dryRun=true`、`location?`、`queryParameters?` | `statementType`、`totalBytesProcessed`、`schema`、`errors` |
-| `POST projects/{p}/jobs`（dry run） | `configuration.dryRun=true`、`configuration.query.{query,useLegacySql,queryParameters}`、`jobReference.location?` | `statistics.query.{statementType,totalBytesProcessed,referencedTables,schema}`、`status.errorResult` |
-| `POST projects/{p}/queries`（実行） | `query`、`useLegacySql=false`、`maximumBytesBilled`、`jobTimeoutMs`、`timeoutMs`、`maxResults`、`labels`、`location?`、`queryParameters?`、`useQueryCache=true` | `jobReference.{jobId,location}`、`jobComplete`、`schema`、`rows`、`totalRows`、`pageToken`、`totalBytesProcessed`、`totalBytesBilled`、`cacheHit`、`totalSlotMs`、`errors` |
-| `GET projects/{p}/queries/{jobId}` | `location`、`pageToken`、`maxResults`、`timeoutMs` | `jobComplete`、`schema`、`rows`、`totalRows`、`pageToken`、`errors` |
+| `POST projects/{p}/jobs`（dry run） | `configuration.dryRun=true`、`configuration.query.{query,useLegacySql=false,parameterMode,queryParameters}`、`configuration.labels`、`jobReference.location?` | `jobReference.location`、`statistics.query.{statementType,totalBytesProcessed,totalBytesProcessedAccuracy,referencedTables,referencedRoutines,undeclaredQueryParameters,schema}`、`status.errorResult` |
+| `POST projects/{p}/jobs`（実行） | `jobReference.{projectId,jobId=bqmcp-<32 hex>,location?}`、`configuration.{jobTimeoutMs,labels}`、`configuration.query.{query,useLegacySql=false,maximumBytesBilled,useQueryCache=true,priority=INTERACTIVE,parameterMode,queryParameters}` | `jobReference.location`、`status.errorResult`; 再試行時の `409 duplicate` は最初の insert が届いていた印 |
+| `GET projects/{p}/queries/{jobId}` | `location`、`timeoutMs=30000`、`maxResults`、`pageToken`、`formatOptions.timestampOutputFormat=ISO8601_STRING` | `jobComplete`、`jobReference`、`schema`、`rows`、`totalRows`、`pageToken`、`totalBytesProcessed`、`errors` |
+| `GET projects/{p}/jobs/{jobId}` | `location` | `statistics.query.{statementType,totalBytesBilled,totalSlotMs,cacheHit,totalBytesProcessed}`、`statistics.totalSlotMs` |
 | `GET projects/{p}/datasets` | `pageToken`、`maxResults` | `datasets[].{datasetReference,location}`、`nextPageToken` |
 | `GET projects/{p}/datasets/{d}/tables` | `pageToken`、`maxResults` | `tables[].{tableReference,type,timePartitioning,clustering}`、`nextPageToken` |
 | `GET projects/{p}/datasets/{d}/tables/{t}` | — | `schema`、`type`、`numRows`、`numBytes`、`timePartitioning`、`rangePartitioning`、`clustering`、`creationTime`、`lastModifiedTime`、`expirationTime`、`description` |
 
 `location` は最初の応答から同じジョブへの以後の全呼び出しへ引き回す（リージョナルなデータセットでは必須）。
 
-行の復号: BigQuery は `rows[].f[].v` をスキーマ順で返し、ネストレコードはさらに `{f:[...]}`、繰り返しフィールドは `[{v:...}]` になる。復号器はスキーマを再帰的に歩いて列名キーのオブジェクトを作る: `RECORD` → オブジェクト、`REPEATED` → 配列、`BYTES` は base64 のまま、`TIMESTAMP`（秒の浮動小数）→ RFC 3339 UTC、`NUMERIC`/`BIGNUMERIC` → 文字列、`INTEGER` → 53 ビットに収まれば数値、さもなくば文字列、`BOOLEAN` → bool、`JSON` → 埋め込み JSON。
+行の復号: BigQuery は `rows[].f[].v` をスキーマ順で返し、ネストレコードはさらに `{f:[...]}`、繰り返しフィールドは `[{v:...}]` になる。復号器はスキーマを再帰的に歩いて列名キーのオブジェクトを作る: `RECORD` → オブジェクト、`REPEATED` → 配列、`BYTES` は base64 のまま、`TIMESTAMP` は ISO 8601 UTC 文字列（`ISO8601_STRING`、ピコ秒精度まで）を要求してそのまま通す — int64 マイクロ秒と秒の浮動小数はフォールバックとしてのみ復号 — `NUMERIC`/`BIGNUMERIC` → 文字列、`INTEGER` → 53 ビットに収まれば数値、さもなくば文字列、`BOOLEAN` → bool、`JSON` → 埋め込み JSON。
 
-エラー写像（`errors.go`）: HTTP ステータスと `error.errors[0].reason` が ADR-0004 の表どおりにコードを決め、`message`・`location`・`reason`・`job_id` が `details` に乗る。再試行: retryable なコードに対して 500〜1500 ms 後に 1 回、冪等な呼び出し（dry run、メタデータ読取、ジョブ参照をまだ返していない `jobs.query`）に限る。
+エラー写像（`errors.go`）: `error.errors[0].reason` が唯一の `reasonRules` 表を通じてコードを決め、HTTP ステータスは補助に過ぎない（ADR-0004 §2）。`message`・`location`・`reason`・`job_id` が `details` に乗る。再試行: retryable なコードに対して 500〜1500 ms 後に 1 回。全呼び出しは送信時点で冪等 — dry run はジョブを作らず、読取は読取、実行はクライアントが名付けたジョブなので、再試行された insert は `409 duplicate` を受けてそのジョブで続行する。
 
 ## `internal/tools`
 
@@ -79,7 +80,7 @@ REST ベース: `https://bigquery.googleapis.com/bigquery/v2`。全リクエス�
 | `query` | `bq.DryRun` → ゲート → `bq.Query` | BigQuery のクエリジョブ |
 | `get_usage` | config | — |
 
-`shape.go` は復号済みの行を両キャップ（ADR-0003）のもとで応答にし、計上フィールドを作る。`gate.go` は 3 つの検査とそのエラーコードを持つ。`warnings.go` は参照テーブルのパーティション情報（dry run が名指ししたテーブルを `tables.get` で引く。高々数個、呼び出しごとにキャッシュ）からパーティションフィルタの助言を作る。
+`shape.go` は復号済みの行を両キャップ（ADR-0003）のもとで応答にし、計上フィールドを作る。`gate.go` は 3 つの検査とそのエラーコード、課金推定（MiB 切り上げ、テーブルごと 10 MiB）を持つ。`warnings.go` は数値だけから助言を作る: 推定がサイズ全体に達したパーティションテーブル（`tables.get` で引く。呼び出しごと最大 5 つ）と、精度が `PRECISE` でない推定。`util.go` は JSON スカラー（型推定）または明示的な `{type, value}` からクエリパラメータを組み立てる。
 
 ## `doctor`
 
