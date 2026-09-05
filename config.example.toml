@@ -1,0 +1,29 @@
+# bigquery-mcp configuration — copy to ~/.config/bigquery-mcp/config.toml
+#
+# One server instance serves one billing project. For several projects, keep
+# one file each and register the binary under several names in your MCP
+# client (bigquery-prod, bigquery-sandbox, ...).
+#
+# Credentials are never stored here: the server uses Application Default
+# Credentials (`gcloud auth application-default login`).
+
+[project]
+id = "your-billing-project"      # where jobs run and are billed (required)
+# location = "US"                # BigQuery infers it from the datasets when omitted
+
+[budget]
+max_bytes_billed = "10GiB"       # dry-run gate threshold; also sent as maximumBytesBilled
+job_timeout      = "3m"          # jobTimeoutMs for every query
+
+[access]
+# datasets = ["proj.dataset", "proj2.*"]   # when set, referenced tables must match
+
+[results]
+default_max_rows = 1000          # when a call omits max_rows
+hard_max_rows    = 50000         # the most a call may ask for
+max_bytes        = "1MiB"        # byte budget for the whole response
+
+[logging]
+# log_file    = ""               # stderr only when omitted
+# log_level   = "info"           # debug | info | warn | error
+# log_queries = false            # opt in to keep SQL text in the log (may contain PII)
