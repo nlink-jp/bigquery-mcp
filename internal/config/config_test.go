@@ -78,15 +78,15 @@ log_queries = true
 
 func TestLoadRejects(t *testing.T) {
 	cases := map[string]string{
-		"unknown key":          "[budget]\nmax_bytes = \"1GiB\"\n",
-		"bad size":             "[budget]\nmax_bytes_billed = \"ten gigs\"\n",
-		"zero budget":          "[budget]\nmax_bytes_billed = \"0\"\n",
-		"bad duration":         "[budget]\njob_timeout = \"soon\"\n",
-		"default above hard":   "[results]\ndefault_max_rows = 10\nhard_max_rows = 5\n",
-		"negative rows":        "[results]\ndefault_max_rows = -1\n",
-		"wildcard project":     "[access]\ndatasets = [\"*.ds\"]\n",
-		"three-part dataset":   "[access]\ndatasets = [\"a.b.c\"]\n",
-		"not toml":             "this is not toml = = =\n",
+		"unknown key":        "[budget]\nmax_bytes = \"1GiB\"\n",
+		"bad size":           "[budget]\nmax_bytes_billed = \"ten gigs\"\n",
+		"zero budget":        "[budget]\nmax_bytes_billed = \"0\"\n",
+		"bad duration":       "[budget]\njob_timeout = \"soon\"\n",
+		"default above hard": "[results]\ndefault_max_rows = 10\nhard_max_rows = 5\n",
+		"negative rows":      "[results]\ndefault_max_rows = -1\n",
+		"wildcard project":   "[access]\ndatasets = [\"*.ds\"]\n",
+		"three-part dataset": "[access]\ndatasets = [\"a.b.c\"]\n",
+		"not toml":           "this is not toml = = =\n",
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {

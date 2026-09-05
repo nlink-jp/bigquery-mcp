@@ -24,12 +24,12 @@ import (
 
 // Defaults. Every value is overridable in the file.
 const (
-	DefaultMaxBytesBilled  int64 = 10 << 30 // 10 GiB
-	DefaultJobTimeout            = 3 * time.Minute
-	DefaultDefaultMaxRows        = 1000
-	DefaultHardMaxRows           = 50000
-	DefaultMaxBytes        int64 = 1 << 20 // 1 MiB response budget
-	DefaultLogLevel              = "info"
+	DefaultMaxBytesBilled int64 = 10 << 30 // 10 GiB
+	DefaultJobTimeout           = 3 * time.Minute
+	DefaultDefaultMaxRows       = 1000
+	DefaultHardMaxRows          = 50000
+	DefaultMaxBytes       int64 = 1 << 20 // 1 MiB response budget
+	DefaultLogLevel             = "info"
 )
 
 // Config is the resolved configuration.
