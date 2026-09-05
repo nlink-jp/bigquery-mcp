@@ -114,9 +114,11 @@ type tableCell struct {
 
 // jobReference is the identity of a job.
 type jobReference struct {
-	ProjectID string `json:"projectId"`
-	JobID     string `json:"jobId"`
-	Location  string `json:"location"`
+	ProjectID string `json:"projectId,omitempty"`
+	JobID     string `json:"jobId,omitempty"`
+	// Location is omitted when empty: BigQuery rejects "" as a location
+	// (live test 2026-09-06) and infers it from the datasets instead.
+	Location string `json:"location,omitempty"`
 }
 
 // queryResponse is the jobs.query / jobs.getQueryResults response.

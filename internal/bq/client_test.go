@@ -171,6 +171,9 @@ func TestQueryInsertsNamedJobPagesAndStops(t *testing.T) {
 	if _, has := cfg["dryRun"]; has && cfg["dryRun"] == true {
 		t.Errorf("the run must not be a dry run")
 	}
+	if _, has := ref["location"]; has {
+		t.Errorf("an unset location must be omitted, not sent as \"\": %v", ref)
+	}
 }
 
 func TestQueryWaitsForCompletionAndReadsStatsFromJobsGet(t *testing.T) {

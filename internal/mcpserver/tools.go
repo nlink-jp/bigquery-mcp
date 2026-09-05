@@ -87,9 +87,9 @@ func (s *Server) handleToolsCall(ctx context.Context, req jsonrpc.Request) error
 
 // writeToolError emits a tool error per MCP convention: result with
 // isError=true and a single text content block. If err is (or wraps) a
-// *toolerr.Error, the content carries the structured {code, message, details}
-// JSON so LLM clients can branch on the code. Otherwise the plain Error()
-// string is used.
+// *toolerr.Error, the content carries the structured
+// {code, message, retryable, details} JSON so LLM clients can branch on
+// the code. Otherwise the plain Error() string is used.
 func (s *Server) writeToolError(req jsonrpc.Request, err error) error {
 	var te *toolerr.Error
 	if errors.As(err, &te) {
