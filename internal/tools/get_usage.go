@@ -13,7 +13,7 @@ import (
 var getUsageTool = mcpserver.Tool{
 	Name:        "get_usage",
 	Description: "Full reference for bigquery-mcp: the workflow, what the gate refuses, the result caps, and the error-recovery table. Call this before your first query.",
-	InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+	InputSchema: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
 }
 
 func (d *deps) getUsage(ctx context.Context, args json.RawMessage) (any, error) {

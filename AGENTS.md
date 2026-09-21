@@ -104,6 +104,22 @@ scripts/                Org release scripts (codesign / notarize / brew) — ven
 - Live tests never carry a project id; they read it from the environment
   and use `bigquery-public-data.samples.wikipedia` for the refusal cases
   (dry runs are free; the gate refuses before anything runs).
+- **Every tool's top-level schema is closed** (`additionalProperties:
+  false`, organization ADR-021 §10), and both halves of the contract are
+  real here: the schema stops a mistyped argument at a validating client,
+  and `parseArgs`' `DisallowUnknownFields` stops it at the server
+  (`TestUnknownArgumentIsRejected` drives that end to end and checks the
+  error names the field). The schemas are six separate JSON literals with no
+  shared builder, so a new tool must add the key by hand —
+  `TestEveryToolSchemaIsClosed` (`internal/tools/schema_test.go`) catches
+  the omission, reading the schemas off a real `tools/list` driven through
+  `Register`.
+- **`params` is the one object that must stay open.** Its keys are the
+  caller's own named query parameters (`@name` in the SQL), so no schema can
+  enumerate them and `additionalProperties: true` is what makes them legal.
+  Closing it would reject every parameterised query. Only the *top level* of
+  each tool schema is closed; `TestParamsObjectStaysOpen` guards the nested
+  exception against a future sweep that closes everything it finds.
 
 ## Release
 

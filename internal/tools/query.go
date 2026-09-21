@@ -11,6 +11,12 @@ import (
 	"github.com/nlink-jp/bigquery-mcp/internal/toolerr"
 )
 
+// paramsSchema is the one object in this server that is deliberately OPEN.
+// Its keys are the caller's own query-parameter names — @name in the SQL — so
+// they cannot be enumerated in a schema, and additionalProperties:true is what
+// makes them legal. Each tool's TOP-LEVEL schema is closed instead
+// (organization ADR-021 §10); do not "fix" the nested true to match.
+// TestParamsObjectStaysOpen pins it.
 const paramsSchema = `"params":{"type":"object","description":"Named query parameters referenced as @name in the SQL. A value is a string, number or boolean (typed as STRING, INT64/FLOAT64, BOOL), or {\"type\": \"DATE\", \"value\": \"2026-09-05\"} for the other scalar types (DATE, TIMESTAMP, DATETIME, TIME, NUMERIC, BIGNUMERIC, BYTES, GEOGRAPHY, JSON). Use literals, not parameters, for partition filters: a parameterised filter may not prune at dry-run time.","additionalProperties":true}`
 
 var dryRunTool = mcpserver.Tool{
@@ -19,7 +25,7 @@ var dryRunTool = mcpserver.Tool{
 	InputSchema: json.RawMessage(`{"type":"object","properties":{
 		"query":{"type":"string","description":"GoogleSQL text."},
 		` + paramsSchema + `
-	},"required":["query"]}`),
+	},"required":["query"],"additionalProperties":false}`),
 }
 
 type sqlArgs struct {
@@ -87,7 +93,7 @@ var queryTool = mcpserver.Tool{
 		"query":{"type":"string","description":"GoogleSQL SELECT text."},
 		` + paramsSchema + `,
 		"max_rows":{"type":"integer","minimum":1,"description":"Rows to return at most (default and ceiling come from the server config)."}
-	},"required":["query"]}`),
+	},"required":["query"],"additionalProperties":false}`),
 }
 
 func (d *deps) query(ctx context.Context, args json.RawMessage) (any, error) {

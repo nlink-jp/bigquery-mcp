@@ -1,5 +1,30 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- All six MCP tool schemas now set `additionalProperties: false` at the top
+  level, as organization ADR-021 §10 requires, so a client validating
+  arguments against the schema refuses a mistyped parameter instead of
+  forwarding it. `parseArgs` already rejected unknown fields, so both halves
+  of the contract now agree.
+
+### Added
+
+- `TestEveryToolSchemaIsClosed` — walks the production registry via a real
+  `tools/list` and fails if any tool's top-level schema omits
+  `additionalProperties: false` or sets it true.
+- `TestParamsObjectStaysOpen` — the nested `params` object of `dry_run` and
+  `query` must keep `additionalProperties: true`: its keys are the caller's
+  own named query parameters, which no schema can enumerate, so closing it
+  would reject every parameterised query. Only the top level is closed, and
+  the exception is now protected against a future sweep.
+- `TestUnknownArgumentIsRejected` — proves the strictness is real and not
+  merely declared: a misspelled `max_rows` comes back as
+  `invalid_arguments` naming the field, rather than silently falling back to
+  the configured default.
+
 ## [0.1.0] - 2026-09-06
 
 ### Added

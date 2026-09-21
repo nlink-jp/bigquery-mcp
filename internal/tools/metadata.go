@@ -14,7 +14,7 @@ var listDatasetsTool = mcpserver.Tool{
 	Description: "List the datasets of a project (the billing project when omitted). Discovery only: nothing is billed and IAM decides what is visible.",
 	InputSchema: json.RawMessage(`{"type":"object","properties":{
 		"project":{"type":"string","description":"Project to list; defaults to the configured billing project."}
-	}}`),
+	},"additionalProperties":false}`),
 }
 
 type listDatasetsArgs struct {
@@ -46,7 +46,7 @@ var listTablesTool = mcpserver.Tool{
 	InputSchema: json.RawMessage(`{"type":"object","properties":{
 		"dataset":{"type":"string","description":"Dataset id."},
 		"project":{"type":"string","description":"Project of the dataset; defaults to the configured billing project."}
-	},"required":["dataset"]}`),
+	},"required":["dataset"],"additionalProperties":false}`),
 }
 
 type listTablesArgs struct {
@@ -83,7 +83,7 @@ var describeTableTool = mcpserver.Tool{
 		"dataset":{"type":"string","description":"Dataset id."},
 		"table":{"type":"string","description":"Table or view id."},
 		"project":{"type":"string","description":"Project of the dataset; defaults to the configured billing project."}
-	},"required":["dataset","table"]}`),
+	},"required":["dataset","table"],"additionalProperties":false}`),
 }
 
 type describeTableArgs struct {
