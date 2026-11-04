@@ -1,6 +1,13 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.2] - 2026-11-04
+
+### Changed
+
+- **The config file is read by nlink-jp/toml** (v0.1.1) instead of the
+  third-party `BurntSushi/toml`, so the server carries no TOML code from
+  outside the organization. The file reads as before: unknown keys are still
+  refused, each named in the error.
 
 ### Fixed
 
