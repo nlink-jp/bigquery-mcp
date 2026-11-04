@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/BurntSushi/toml"
+	"github.com/nlink-jp/toml"
 )
 
 // Defaults. Every value is overridable in the file.
@@ -144,11 +144,13 @@ func load(path string, mustExist bool) (*Config, error) {
 		return nil, fmt.Errorf("config: stat %s: %w", path, err)
 	}
 	var raw tomlConfig
-	meta, err := toml.DecodeFile(path, &raw)
-	if err != nil {
+	_, err := toml.DecodeFile(path, &raw)
+	var unknown *toml.UnknownKeysError
+	if err != nil && !errors.As(err, &unknown) {
 		return nil, fmt.Errorf("config: parse %s: %w", path, err)
 	}
-	if undecoded := meta.Undecoded(); len(undecoded) > 0 {
+	if unknown != nil {
+		undecoded := unknown.Keys
 		keys := make([]string, len(undecoded))
 		for i, k := range undecoded {
 			keys[i] = k.String()
