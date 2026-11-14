@@ -6,6 +6,10 @@
 
 - `make package` runs `govulncheck ./...` first (`make vuln`) and stops on a
   finding, so a release cannot be built past one.
+- `make vuln` — and so `make package` — scans every platform in `PLATFORMS`,
+  with the environment `build-all` builds each with. It scanned the host's
+  build alone, so an advisory in a Linux- or Windows-only package could not
+  stop a release.
 
 ## [0.1.2] - 2026-11-04
 
