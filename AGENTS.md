@@ -24,6 +24,7 @@ make check       # vet + test + build
 make live-test   # -tags live against a real project; needs ADC and
                  # BIGQUERY_MCP_TEST_PROJECT (+ BIGQUERY_MCP_TEST_DATASET)
 make package     # cross-compile, archive, notarize darwin
+make vuln            # govulncheck over the build; `make package` runs it first and stops on a finding
 make verify-release
 ```
 
